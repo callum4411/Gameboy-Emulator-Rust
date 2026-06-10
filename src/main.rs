@@ -5,22 +5,22 @@ mod timer;
 mod mmu;
 mod cartridge;
 mod platform;
+mod hide;
 
 use crate::gameboy::GameBoy;
 use crate::cpu::Cpu;
+use crate::hide::Hide;
 
 fn main() {
-    let path: &str = "rom path";
+    let hide = Hide::new();
+    let path = &hide.path;
+
     let mut gb = GameBoy::new(path);
 
-    // gb.cpu.a = 0x42;
-    // gb.cpu.pc = 0x0100;
-    // gb.mmu.write(0xC000, 0x47);
-    loop{
+    gb.cpu.pc = 0x0100;
+
+    for _ in 0..100{
         gb.step();
     }
-    // gb.step();
-    // println!("A  = {} ({:#04X})", gb.cpu.a, gb.cpu.a);
-    // println!("B  = {} ({:#04X})", gb.cpu.b, gb.cpu.b);
-    // println!("PC = {} ({:#06X})", gb.cpu.pc, gb.cpu.pc);
+
 }
