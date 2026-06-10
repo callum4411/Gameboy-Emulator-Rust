@@ -6,10 +6,10 @@ pub struct GameBoy{
     pub(crate) mmu: Mmu,
 }
 impl GameBoy{
-    pub fn new() -> GameBoy{
+    pub fn new(path: &str) -> GameBoy{
         GameBoy{
             cpu: Cpu::new(),
-            mmu: Mmu::new(),
+            mmu: Mmu::new(path),
         }
     }
 

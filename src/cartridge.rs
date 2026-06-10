@@ -9,4 +9,8 @@ impl Cartridge {
             rom,
         }
     }
+
+    pub(crate) fn read(&self, addr: u16) -> u8 {
+        self.rom[addr as usize]
+    }
 }
