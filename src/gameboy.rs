@@ -96,6 +96,23 @@ impl GameBoy{
         (high << 8) | low
     }
 
+    fn get_register_by_bits(&self, bits: u8) -> u8{
+        match bits{
+            0 => self.cpu.b,
+            1 => self.cpu.c,
+            2 => self.cpu.d,
+            3 => self.cpu.e,
+            4 => self.cpu.h,
+            5 => self.cpu.l,
+            6 => {
+                let hl = self.cpu.hl();
+                self.mmu.read(hl)
+            },
+            7 => self.cpu.a,
+            _ => unreachable!()
+        }
+    }
+
     pub(crate) fn execute (&mut self, opcode: u8){
         match opcode{
             0x00 => (),
@@ -214,6 +231,31 @@ impl GameBoy{
                 self.cpu.a = data;
                 self.cpu.set_hl(hl);
             },
+            0x80..=0x87 =>{
+                let a = self.cpu.a;
+                let r = self.get_register_by_bits(opcode & 0b0000_0111);
+                let result = a.wrapping_add(r);
+
+                self.cpu.set_flag_z(result == 0);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h((a & 0x0F) + (r & 0x0F) > 0x0F);
+                self.cpu.set_flag_c((a as u16) + (r as u16) > 0xFF);
+                self.cpu.a = result;
+            },
+            0x88..=0x8F =>{
+                let a = self.cpu.a;
+                let r = self.get_register_by_bits(opcode & 0b0000_0111);
+                let c = if self.cpu.flag_c() {1} else {0};
+                let result = a.wrapping_add(r).wrapping_add(c);
+
+                self.cpu.set_flag_z(result == 0);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h((a & 0x0F) + (r & 0x0F) > 0x0F);
+                self.cpu.set_flag_c((a as u16) + (r as u16) > 0xFF);
+
+                self.cpu.a = result;
+            },
+
 
             _=> panic!("not implemented: {:#04X}", opcode),
         }
