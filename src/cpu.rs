@@ -10,6 +10,9 @@ pub struct Cpu{
     pub(crate) sp: u16,
     pub(crate) pc: u16,
     pub(crate) halted: bool,
+    pub(crate) ime: bool,
+    pub(crate) ei_delay: bool,
+    pub(crate) is_stopped: bool,
 }
 
  impl Cpu{
@@ -26,6 +29,9 @@ pub struct Cpu{
              sp: 0,
              pc: 0,
              halted: false,
+             ime: false,
+             ei_delay: false,
+             is_stopped: false,
          }
 
      }

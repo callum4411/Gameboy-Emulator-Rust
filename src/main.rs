@@ -19,7 +19,7 @@ fn main() {
 
     gb.cpu.pc = 0x0100;
 
-    for _ in 0..100{
+    for _ in 0..100000000{
         gb.step();
     }
 
