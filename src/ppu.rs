@@ -13,6 +13,8 @@ pub(crate) struct Ppu {
     pub(crate) dots: u32,
     pub(crate) framebuffer: [u8;160*144],
     pub(crate) frame_count: u32,
+    pub(crate) line_rendered: bool, // has the current LY been drawn yet this line
+    pub(crate) stat_line: bool,     // previous state of the STAT interrupt line (rising-edge detect)
 }
 
 impl Ppu {
@@ -22,6 +24,8 @@ impl Ppu {
             dots: 0,
             framebuffer: [0;160*144],
             frame_count: 0,
+            line_rendered: false,
+            stat_line: false,
         }
     }
 }

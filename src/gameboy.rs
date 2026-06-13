@@ -18,37 +18,74 @@ impl GameBoy{
     }
 
     pub(crate) fn tick_ppu(&mut self, cycles: u8) -> bool{
+        // LCD disabled (LCDC bit 7 = 0): PPU is off, LY resets, screen is blank.
+        if self.mmu.lcdc & 0b1000_0000 == 0 {
+            self.mmu.ly = 0;
+            self.ppu.dots = 0;
+            self.ppu.mode = Mode::HBlank;
+            self.mmu.stat &= 0b1111_1100;
+            self.ppu.line_rendered = false;
+            self.ppu.stat_line = false;
+            return false;
+        }
+
         self.ppu.dots = self.ppu.dots.wrapping_add(cycles as u32);
-        let mut frame_done=false;
+        let mut frame_done = false;
+
         if self.ppu.dots >= 456 {
-            self.ppu.dots = self.ppu.dots.wrapping_sub(456);
-            self.mmu.ly = self.mmu.ly.wrapping_add(1);
-            if self.mmu.ly <=143 {
-                self.render_scanline();
-            } else if self.mmu.ly == 144{
-                self.ppu.frame_count = self.ppu.frame_count.wrapping_add(1);
-                if self.ppu.frame_count % 60 ==0{
-                    println!("{}", self.ppu.frame_count)
-                }
-                frame_done = true;
-                self.mmu.interrupt_flag |= 0b0000_0001;
-            } else if self.mmu.ly <154{
-            } else {
+            self.ppu.dots -= 456;
+            self.mmu.ly += 1;
+            if self.mmu.ly > 153 {
                 self.mmu.ly = 0;
             }
-            self.mmu.stat = (self.mmu.stat & 0b1111_1100) | (self.ppu.mode as u8);
+            self.ppu.line_rendered = false;
+            if self.mmu.ly == 144 {
+                self.ppu.frame_count = self.ppu.frame_count.wrapping_add(1);
+                frame_done = true;
+                self.mmu.interrupt_flag |= 0b0000_0001; // VBlank
+            }
+        }
 
-        }
-        if self.mmu.ly >= 144 {
-            self.ppu.mode = Mode::VBlank;
+        // Determine the current mode from LY / dots.
+        let mode = if self.mmu.ly >= 144 {
+            Mode::VBlank
         } else if self.ppu.dots < 80 {
-            self.ppu.mode = Mode::OamScan;
+            Mode::OamScan
         } else if self.ppu.dots < 252 {
-            self.ppu.mode = Mode::Drawing;
+            Mode::Drawing
         } else {
-            self.ppu.mode = Mode::HBlank;
+            Mode::HBlank
+        };
+        self.ppu.mode = mode;
+        self.mmu.stat = (self.mmu.stat & 0b1111_1100) | (mode as u8);
+
+        // Render each visible line once, at the start of its Drawing phase, so that
+        // SCX/SCY writes the game makes during the previous line's HBlank land on the
+        // correct scanline (this is what makes per-line parallax scrolling work).
+        if matches!(mode, Mode::Drawing) && !self.ppu.line_rendered && self.mmu.ly <= 143 {
+            self.render_scanline();
+            self.ppu.line_rendered = true;
         }
-        self.mmu.stat = (self.mmu.stat & 0b1111_1100) | (self.ppu.mode as u8);
+
+        // LYC == LY coincidence flag (STAT bit 2).
+        let coincidence = self.mmu.ly == self.mmu.lyc;
+        if coincidence {
+            self.mmu.stat |= 0b0000_0100;
+        } else {
+            self.mmu.stat &= !0b0000_0100;
+        }
+
+        // STAT interrupt: fires on the rising edge of the OR of all enabled sources.
+        let stat = self.mmu.stat;
+        let stat_line =
+            (stat & 0b0100_0000 != 0 && coincidence)                  // LYC == LY
+            || (stat & 0b0010_0000 != 0 && matches!(mode, Mode::OamScan)) // mode 2
+            || (stat & 0b0001_0000 != 0 && matches!(mode, Mode::VBlank))  // mode 1
+            || (stat & 0b0000_1000 != 0 && matches!(mode, Mode::HBlank)); // mode 0
+        if stat_line && !self.ppu.stat_line {
+            self.mmu.interrupt_flag |= 0b0000_0010; // STAT
+        }
+        self.ppu.stat_line = stat_line;
 
         frame_done
     }
@@ -58,29 +95,123 @@ impl GameBoy{
     }
 
     fn render_scanline(&mut self){
-        for screen_x in 0..=159{
-            let map_y = (self.mmu.ly as u16 + self.mmu.scy as u16) & 0xFF;
-            let map_x = (screen_x as u16 + self.mmu.scx as u16) & 0xFF;
-            let tile_col = map_x/8;
-            let tile_row = map_y/8;
+        let ly = self.mmu.ly;
+        let lcdc = self.mmu.lcdc;
+        // Raw (pre-palette) BG/window colour index per pixel, kept for sprite priority.
+        let mut bg_colour = [0u8; 160];
 
-            let map_index = tile_row*32+tile_col;
-            let tile_number = self.mmu.read(0x9800+map_index);
-            let tile_address: u16 = if self.mmu.lcdc & 0b0001_0000 !=0 {
-                0x8000 + (tile_number as u16 *16)
-            } else {
-                (0x9000 as i32 + (tile_number as i8 as i32)*16) as u16
-            };
-            let px = map_x%8;
-            let py = map_y%8;
-            let low_byte = self.mmu.read(tile_address + py*2);
-            let high_byte = self.mmu.read(tile_address + py*2 +1);
-            let bit = 7-px;
-            let low_bit = (low_byte >> bit) & 1;
-            let high_bit = (high_byte >> bit) & 1;
-            let colour_index = (high_bit << 1) | low_bit;
-            let shade = (self.mmu.bgp >> (colour_index*2)) & 0b11;
-            self.ppu.framebuffer[self.mmu.ly as usize*160 + screen_x as usize] = shade;
+        // ---------- Background + Window ----------
+        // On DMG, LCDC bit 0 = 0 blanks the BG/window to colour 0 (and disables window).
+        if lcdc & 0b0000_0001 != 0 {
+            let bg_map: u16    = if lcdc & 0b0000_1000 != 0 { 0x9C00 } else { 0x9800 };
+            let win_map: u16   = if lcdc & 0b0100_0000 != 0 { 0x9C00 } else { 0x9800 };
+            let signed         = lcdc & 0b0001_0000 == 0; // bit4: 1 => $8000 unsigned, 0 => $9000 signed
+            let window_on      = lcdc & 0b0010_0000 != 0;
+            let wy = self.mmu.wy;
+            let wx = self.mmu.wx;
+
+            for screen_x in 0u8..160 {
+                // Pick window or background for this pixel.
+                let use_window = window_on
+                    && ly >= wy
+                    && (screen_x as i16) >= (wx as i16 - 7);
+                let (map_base, tx, ty) = if use_window {
+                    let win_x = (screen_x as i16 - (wx as i16 - 7)) as u16;
+                    let win_y = (ly - wy) as u16;
+                    (win_map, win_x, win_y)
+                } else {
+                    let map_x = (screen_x as u16 + self.mmu.scx as u16) & 0xFF;
+                    let map_y = (ly as u16 + self.mmu.scy as u16) & 0xFF;
+                    (bg_map, map_x, map_y)
+                };
+
+                let tile_col = tx / 8;
+                let tile_row = ty / 8;
+                let map_index = tile_row * 32 + tile_col;
+                let tile_number = self.mmu.read(map_base + map_index);
+                let tile_address: u16 = if signed {
+                    (0x9000i32 + (tile_number as i8 as i32) * 16) as u16
+                } else {
+                    0x8000 + (tile_number as u16) * 16
+                };
+                let px = tx % 8;
+                let py = ty % 8;
+                let low_byte = self.mmu.read(tile_address + py * 2);
+                let high_byte = self.mmu.read(tile_address + py * 2 + 1);
+                let bit = 7 - px;
+                let colour_index = (((high_byte >> bit) & 1) << 1) | ((low_byte >> bit) & 1);
+
+                bg_colour[screen_x as usize] = colour_index;
+                let shade = (self.mmu.bgp >> (colour_index * 2)) & 0b11;
+                self.ppu.framebuffer[ly as usize * 160 + screen_x as usize] = shade;
+            }
+        } else {
+            for screen_x in 0..160 {
+                self.ppu.framebuffer[ly as usize * 160 + screen_x] = 0;
+            }
+        }
+
+        // ---------- Sprites (OBJ) ----------
+        if lcdc & 0b0000_0010 != 0 {
+            let height: u8 = if lcdc & 0b0000_0100 != 0 { 16 } else { 8 };
+            let ly_i = ly as i16;
+
+            // Scan OAM in order, keep the first 10 sprites that cover this line.
+            // Tuple: (x, oam_index, y, tile, attr).
+            let mut line: Vec<(u8, usize, u8, u8, u8)> = Vec::new();
+            for i in 0..40 {
+                let base = 0xFE00 + (i as u16) * 4;
+                let y = self.mmu.read(base);
+                let top = y as i16 - 16;
+                if ly_i >= top && ly_i < top + height as i16 {
+                    let x = self.mmu.read(base + 1);
+                    let tile = self.mmu.read(base + 2);
+                    let attr = self.mmu.read(base + 3);
+                    line.push((x, i, y, tile, attr));
+                    if line.len() == 10 { break; }
+                }
+            }
+            // DMG priority: smaller X wins; ties broken by lower OAM index.
+            // Sort highest-priority first, then let `painted` block lower sprites.
+            line.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+            let mut painted = [false; 160];
+            for (x, _idx, y, tile, attr) in line {
+                let flip_y      = attr & 0b0100_0000 != 0;
+                let flip_x      = attr & 0b0010_0000 != 0;
+                let palette     = if attr & 0b0001_0000 != 0 { self.mmu.obp1 } else { self.mmu.obp0 };
+                let behind_bg   = attr & 0b1000_0000 != 0; // priority bit: sprite behind BG colours 1-3
+
+                let top = y as i16 - 16;
+                let mut row = (ly_i - top) as u8;
+                if flip_y { row = height - 1 - row; }
+
+                // 8x16 ignores the tile's low bit; the two stacked tiles are contiguous
+                // in VRAM so a single offset formula spans rows 0..15.
+                let tile_index = if height == 16 { tile & 0xFE } else { tile };
+                let tile_addr = 0x8000u16 + (tile_index as u16) * 16 + (row as u16) * 2;
+                let low_byte = self.mmu.read(tile_addr);
+                let high_byte = self.mmu.read(tile_addr + 1);
+
+                let sprite_x = x as i16 - 8;
+                for col in 0u8..8 {
+                    let screen_x = sprite_x + col as i16;
+                    if screen_x < 0 || screen_x >= 160 { continue; }
+                    let sx = screen_x as usize;
+                    if painted[sx] { continue; } // a higher-priority sprite already owns this pixel
+
+                    let bit = if flip_x { col } else { 7 - col };
+                    let colour_index = (((high_byte >> bit) & 1) << 1) | ((low_byte >> bit) & 1);
+                    if colour_index == 0 { continue; } // colour 0 is transparent
+
+                    // This sprite claims the pixel (sprite-sprite priority resolved).
+                    painted[sx] = true;
+                    if !(behind_bg && bg_colour[sx] != 0) {
+                        let shade = (palette >> (colour_index * 2)) & 0b11;
+                        self.ppu.framebuffer[ly as usize * 160 + sx] = shade;
+                    }
+                }
+            }
         }
     }
 

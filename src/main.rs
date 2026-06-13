@@ -5,6 +5,7 @@ mod timer;
 mod mmu;
 mod cartridge;
 mod platform;
+mod apu;
 mod hide;
 
 use crate::gameboy::GameBoy;
@@ -18,10 +19,12 @@ fn main() {
 
     let mut gb = GameBoy::new(path);
     let mut platform = Platform::new();
+    platform.init_audio(gb.mmu.apu.buffer());
 
     while platform.is_open() {
         let cycles =gb.step();
         let check = gb.mmu.timer.process_cycles(cycles);
+        gb.mmu.apu.step(cycles as u32);
         let frame_done =gb.tick_ppu(cycles);
         if check {
             gb.mmu.interrupt_flag |= 0b0000_0100
@@ -36,4 +39,6 @@ fn main() {
 
     }
 
+    // Window closed: persist battery-backed save RAM.
+    gb.mmu.save();
 }

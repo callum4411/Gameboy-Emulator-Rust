@@ -1,9 +1,15 @@
 use minifb::{Window, WindowOptions, Key, Scale};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+use crate::apu::SAMPLE_RATE;
 
 pub(crate) struct Platform {
     window: Window,
-    buffer: [u32; 160*144]
-
+    buffer: [u32; 160*144],
+    // Kept alive for the program's lifetime; dropping it stops audio playback.
+    _audio_stream: Option<cpal::Stream>,
 }
 
 impl Platform {
@@ -15,7 +21,47 @@ impl Platform {
             WindowOptions { scale: Scale::X2, ..WindowOptions::default() },
         ).unwrap();
         window.set_target_fps(60);
-        Platform { window, buffer: [0; 160 * 144] }
+        Platform { window, buffer: [0; 160 * 144], _audio_stream: None }
+    }
+
+    // Open the OS audio device and stream samples out of the shared APU buffer.
+    // All cpal/platform-audio specifics live here; the APU never sees them.
+    pub(crate) fn init_audio(&mut self, samples: Arc<Mutex<VecDeque<f32>>>) {
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => { eprintln!("no audio output device found; running without sound"); return; }
+        };
+
+        let config = cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let stream = device.build_output_stream(
+            &config,
+            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let mut buf = samples.lock().unwrap();
+                for s in out.iter_mut() {
+                    // Underrun -> output silence rather than glitching.
+                    *s = buf.pop_front().unwrap_or(0.0);
+                }
+            },
+            |err| eprintln!("audio stream error: {}", err),
+            None,
+        );
+
+        match stream {
+            Ok(s) => {
+                if let Err(e) = s.play() {
+                    eprintln!("failed to start audio stream: {}", e);
+                } else {
+                    self._audio_stream = Some(s);
+                }
+            }
+            Err(e) => eprintln!("failed to build audio stream ({}); running without sound", e),
+        }
     }
 
     pub(crate) fn render(&mut self, framebuffer: &[u8;160*144]) {
