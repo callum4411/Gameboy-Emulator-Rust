@@ -155,8 +155,8 @@ impl Mmu {
         };
     }
 
-    // Persist battery-backed cartridge RAM to disk.
-    pub(crate) fn save(&self) {
+    // Persist battery-backed cartridge RAM to disk (no-op unless RAM changed).
+    pub(crate) fn save(&mut self) {
         self.cartridge.save();
     }
 }

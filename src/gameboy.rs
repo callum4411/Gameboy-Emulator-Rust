@@ -91,6 +91,12 @@ impl GameBoy{
     }
 
     pub(crate) fn set_buttons(&mut self, buttons: u8){
+        // A button being newly pressed (bit goes 0 -> 1) drives a P1 line low,
+        // which requests the joypad interrupt (used to wake from HALT/STOP).
+        let newly_pressed = buttons & !self.mmu.buttons;
+        if newly_pressed != 0 {
+            self.mmu.interrupt_flag |= 0b0001_0000; // Joypad
+        }
         self.mmu.buttons = buttons;
     }
 

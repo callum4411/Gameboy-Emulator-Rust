@@ -20,6 +20,7 @@ pub struct Cartridge {
     pub(crate) rom_banks: usize,
     pub(crate) ram_banks: usize,
     save_path: Option<String>, // Some(...) only for battery-backed carts with RAM
+    ram_dirty: bool,           // RAM changed since the last save
 }
 
 impl Cartridge {
@@ -88,15 +89,23 @@ impl Cartridge {
             rom_banks,
             ram_banks,
             save_path,
+            ram_dirty: false,
         }
     }
 
-    // Write battery-backed RAM to disk. Call on exit (and periodically if desired).
-    pub(crate) fn save(&self) {
+    // Write battery-backed RAM to disk if it changed since the last save.
+    // Safe to call every frame: it's a no-op unless RAM is dirty.
+    pub(crate) fn save(&mut self) {
+        if !self.ram_dirty {
+            return;
+        }
         if let Some(sp) = &self.save_path {
-            if let Err(e) = std::fs::write(sp, &self.ram) {
-                eprintln!("failed to write save file {}: {}", sp, e);
+            match std::fs::write(sp, &self.ram) {
+                Ok(()) => self.ram_dirty = false,
+                Err(e) => eprintln!("failed to write save file {}: {}", sp, e),
             }
+        } else {
+            self.ram_dirty = false; // no battery; nothing to persist
         }
     }
 
@@ -207,7 +216,10 @@ impl Cartridge {
             return;
         }
         match self.mbc {
-            Mbc::Mbc2 => self.ram[(addr as usize) & 0x01FF] = data & 0x0F,
+            Mbc::Mbc2 => {
+                self.ram[(addr as usize) & 0x01FF] = data & 0x0F;
+                self.ram_dirty = true;
+            }
             Mbc::Mbc3 if self.ram_bank >= 0x08 => {
                 let idx = (self.ram_bank - 0x08) as usize;
                 if idx < 5 {
@@ -221,6 +233,7 @@ impl Cartridge {
                 let len = self.ram.len();
                 let offset = self.ram_offset(addr) % len;
                 self.ram[offset] = data;
+                self.ram_dirty = true;
             }
         }
     }
