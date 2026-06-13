@@ -1,5 +1,7 @@
 use crate::cartridge;
 use crate::cartridge::Cartridge;
+use crate::ppu::Ppu;
+use crate::timer::Timer;
 
 
 pub struct Mmu {
@@ -11,6 +13,16 @@ pub struct Mmu {
     serial_data: u8,
     pub(crate) interrupt_flag: u8,
     pub(crate) interrupt_enable: u8,
+    pub(crate) timer: Timer,
+    pub(crate) lcdc: u8,
+    pub(crate) stat: u8,
+    pub(crate) scy: u8,
+    pub(crate) scx: u8,
+    pub(crate) lyc: u8,
+    pub(crate) bgp: u8,
+    pub(crate) ly: u8,
+    pub(crate) buttons: u8,
+    pub(crate) joypad_select: u8,
 }
 impl Mmu {
     pub fn new(path: &str) -> Mmu {
@@ -23,10 +35,52 @@ impl Mmu {
             serial_data: 0,
             interrupt_flag: 0,
             interrupt_enable: 0,
+            timer: Timer::new(),
+            lcdc: 0,
+            stat: 0,
+            scy: 0,
+            scx: 0,
+            lyc: 0,
+            bgp: 0,
+            ly: 0,
+            buttons: 0,
+            joypad_select: 0,
         }
     }
     pub(crate) fn read(&self, addr: u16) -> u8 {
         match addr {
+            0xFF00 => {
+                let mut output = 0xCF;
+                if self.joypad_select & 0b0010_0000 == 0{ //buttons selected
+                    let a = ((!self.buttons) & 0b0001_0000)>>4;
+                    let b = ((!self.buttons) & 0b0010_0000)>>5;
+                    let start = ((!self.buttons) & 0b1000_0000)>>7;
+                    let select = ((!self.buttons) & 0b0100_0000)>>6;
+                    output = 0b1101_0000;
+                    output = output + (a) + (b<<1)+ (start<<3) + (select<<2);
+                } else if self.joypad_select & 0b0001_0000 == 0 {
+                    let right = (!self.buttons) & 0b000_0001;
+                    let up = ((!self.buttons) & 0b0000_0100)>>2;
+                    let left = ((!self.buttons) & 0b0000_0010)>>1;
+                    let down = ((!self.buttons) & 0b0000_1000)>>3;
+                    output = 0b1110_0000;
+                    output = output + (right) + (up<<2)+ (left<<1) + (down<<3);
+                }
+                output
+            },
+            0xFF40 => self.lcdc,
+            0xFF41 => self.stat,
+            0xFF42 => self.scy,
+            0xFF43 => self.scx,
+            0xFF44 => self.ly,
+            0xFF45 => self.lyc,
+            0xFF47 => self.bgp,
+            0xFF04 => self.timer.div,
+            0xFF05 => self.timer.tima,
+            0xFF06 => self.timer.tma,
+            0xFF07 => self.timer.tac,
+            0xFF0F => 0xE0 | self.interrupt_flag,
+            0xFFFF => self.interrupt_enable,
             0xC000 ..= 0xDFFF => self.wram[(addr - 0xC000) as usize],
             0x8000 ..= 0x9FFF => self.vram[(addr - 0x8000) as usize],
             0xFE00 ..= 0xFE9F => self.oam[(addr - 0xFE00) as usize],
@@ -40,6 +94,17 @@ impl Mmu {
 
     pub(crate) fn write(&mut self, addr: u16, data: u8) {
         match addr {
+            0xFF00 => self.joypad_select = data,
+            0xFF40 => self.lcdc = data,
+            0xFF41 => self.stat = data,
+            0xFF42 => self.scy = data,
+            0xFF43 => self.scx = data,
+            0xFF45 => self.lyc = data,
+            0xFF47 => self.bgp = data,
+            0xFF04 => self.timer.div =0,
+            0xFF05 => self.timer.tima = data,
+            0xFF06 => self.timer.tma =data,
+            0xFF07 => self.timer.tac = data,
             0xFF0F => self.interrupt_flag = data,
             0xFFFF => self.interrupt_enable = data,
             0xC000 ..= 0xDFFF => self.wram[(addr - 0xC000) as usize] = data,

@@ -1,17 +1,89 @@
 use crate::cpu::Cpu;
 use crate::mmu::Mmu;
+use crate::ppu::Ppu;
+use crate::ppu::Mode;
 
 pub struct GameBoy{
     pub(crate) cpu: Cpu,
     pub(crate) mmu: Mmu,
+    pub(crate) ppu: Ppu,
 }
 impl GameBoy{
     pub fn new(path: &str) -> GameBoy{
         GameBoy{
             cpu: Cpu::new(),
             mmu: Mmu::new(path),
+            ppu: Ppu::new()
         }
     }
+
+    pub(crate) fn tick_ppu(&mut self, cycles: u8) -> bool{
+        self.ppu.dots = self.ppu.dots.wrapping_add(cycles as u32);
+        let mut frame_done=false;
+        if self.ppu.dots >= 456 {
+            self.ppu.dots = self.ppu.dots.wrapping_sub(456);
+            self.mmu.ly = self.mmu.ly.wrapping_add(1);
+            if self.mmu.ly <=143 {
+                self.render_scanline();
+            } else if self.mmu.ly == 144{
+                self.ppu.frame_count = self.ppu.frame_count.wrapping_add(1);
+                if self.ppu.frame_count % 60 ==0{
+                    println!("{}", self.ppu.frame_count)
+                }
+                frame_done = true;
+                self.mmu.interrupt_flag |= 0b0000_0001;
+            } else if self.mmu.ly <154{
+            } else {
+                self.mmu.ly = 0;
+            }
+            self.mmu.stat = (self.mmu.stat & 0b1111_1100) | (self.ppu.mode as u8);
+
+        }
+        if self.mmu.ly >= 144 {
+            self.ppu.mode = Mode::VBlank;
+        } else if self.ppu.dots < 80 {
+            self.ppu.mode = Mode::OamScan;
+        } else if self.ppu.dots < 252 {
+            self.ppu.mode = Mode::Drawing;
+        } else {
+            self.ppu.mode = Mode::HBlank;
+        }
+        self.mmu.stat = (self.mmu.stat & 0b1111_1100) | (self.ppu.mode as u8);
+
+        frame_done
+    }
+
+    pub(crate) fn set_buttons(&mut self, buttons: u8){
+        self.mmu.buttons = buttons;
+    }
+
+    fn render_scanline(&mut self){
+        for screen_x in 0..=159{
+            let map_y = (self.mmu.ly as u16 + self.mmu.scy as u16) & 0xFF;
+            let map_x = (screen_x as u16 + self.mmu.scx as u16) & 0xFF;
+            let tile_col = map_x/8;
+            let tile_row = map_y/8;
+
+            let map_index = tile_row*32+tile_col;
+            let tile_number = self.mmu.read(0x9800+map_index);
+            let tile_address: u16 = if self.mmu.lcdc & 0b0001_0000 !=0 {
+                0x8000 + (tile_number as u16 *16)
+            } else {
+                (0x9000 as i32 + (tile_number as i8 as i32)*16) as u16
+            };
+            let px = map_x%8;
+            let py = map_y%8;
+            let low_byte = self.mmu.read(tile_address + py*2);
+            let high_byte = self.mmu.read(tile_address + py*2 +1);
+            let bit = 7-px;
+            let low_bit = (low_byte >> bit) & 1;
+            let high_bit = (high_byte >> bit) & 1;
+            let colour_index = (high_bit << 1) | low_bit;
+            let shade = (self.mmu.bgp >> (colour_index*2)) & 0b11;
+            self.ppu.framebuffer[self.mmu.ly as usize*160 + screen_x as usize] = shade;
+        }
+    }
+
 
     pub(crate) fn fetch_byte (&mut self) -> u8{
         let byte:u8 =self.mmu.read(self.cpu.pc);
@@ -370,7 +442,7 @@ impl GameBoy{
             0x22 => {
                 let mut hl = self.cpu.hl();
                 self.mmu.write(hl, self.cpu.a);
-                hl +=1;
+                hl = hl.wrapping_add(1);
                 self.cpu.set_hl(hl);
                 8
             },
@@ -409,20 +481,6 @@ impl GameBoy{
                 self.cpu.a = result;
                 if opcode == 0x86 {8} else {4}
             },
-            0x8E => {
-                let a = self.cpu.a;
-                let r = self.get_register_by_bits(opcode & 0b0000_0111);
-                let c = if self.cpu.flag_c() {1} else {0};
-                let result = a.wrapping_add(r).wrapping_add(c);
-
-                self.cpu.set_flag_z(result == 0);
-                self.cpu.set_flag_n(false);
-                self.cpu.set_flag_h((a & 0x0F) + (r & 0x0F) > 0x0F);
-                self.cpu.set_flag_c((a as u16) + (r as u16) > 0xFF);
-
-                self.cpu.a = result;
-                8
-            },
             0x88..=0x8F =>{
                 let a = self.cpu.a;
                 let r = self.get_register_by_bits(opcode & 0b0000_0111);
@@ -431,8 +489,8 @@ impl GameBoy{
 
                 self.cpu.set_flag_z(result == 0);
                 self.cpu.set_flag_n(false);
-                self.cpu.set_flag_h((a & 0x0F) + (r & 0x0F) > 0x0F);
-                self.cpu.set_flag_c((a as u16) + (r as u16) > 0xFF);
+                self.cpu.set_flag_h((a & 0x0F) + (r & 0x0F) + c > 0x0F);
+                self.cpu.set_flag_c((a as u16) + (r as u16) + (c as u16) > 0xFF);
 
                 self.cpu.a = result;
                 if opcode == 0x8E {8} else {4}
@@ -497,14 +555,14 @@ impl GameBoy{
 
                 let result = a.wrapping_sub(r);
 
-                self.cpu.set_flag_z(a<r);
+                self.cpu.set_flag_z(a==r);
                 self.cpu.set_flag_n(true);
                 self.cpu.set_flag_h((a & 0x0F) < (r & 0x0F));
                 self.cpu.set_flag_c(a<r);
                 if opcode == 0xBE {8} else {4}
             },
             0x09 | 0x19 | 0x29 | 0x39 => {
-                let rr = self.get_pair_by_bits(opcode & 0b0000_0011);
+                let rr = self.get_pair_by_bits((opcode >> 4) & 0b0000_0011);
                 let hl = self.cpu.hl();
                 let result = hl.wrapping_add(rr);
 
@@ -516,13 +574,13 @@ impl GameBoy{
                 8
             },
             0x03 | 0x13 | 0x23 | 0x33 => {
-                let rr = self.get_pair_by_bits(opcode & 0b0000_0011);
-                self.set_pair_by_bits(opcode & 0b0000_0011, rr.wrapping_add(1));
+                let rr = self.get_pair_by_bits((opcode>>4) & 0b0000_0011);
+                self.set_pair_by_bits((opcode >>4)& 0b0000_0011, rr.wrapping_add(1));
                 8
             },
             0x0B | 0x1B | 0x2B | 0x3B => {
-                let rr = self.get_pair_by_bits(opcode & 0b0000_0011);
-                self.set_pair_by_bits(opcode & 0b0000_0011, rr.wrapping_sub(1));
+                let rr = self.get_pair_by_bits((opcode>>4) & 0b0000_0011);
+                self.set_pair_by_bits((opcode >>4) & 0b0000_0011, rr.wrapping_sub(1));
                 8
             }
             0xE8 => {
@@ -553,7 +611,7 @@ impl GameBoy{
             }
             0xC2 | 0xCA | 0xD2 | 0xDA => {
                 let addr = self.fetch_word();
-                if self.check_condition(opcode & 0b0000_0011) {
+                if self.check_condition(opcode >> 3 & 0b0000_0011) {
                     self.cpu.pc = addr;
                     // **IMPORTANT** need to add extra execution cycles or else the clock will run too slowly as going down the branch takes longer than ignoring it
                     16
@@ -567,7 +625,7 @@ impl GameBoy{
             },
             0x20 | 0x28 | 0x30 | 0x38 => {
                 let offset = self.fetch_byte() as i8;
-                if self.check_condition(opcode & 0b0000_0011) {
+                if self.check_condition(opcode >>3 & 0b0000_0011) {
                     self.cpu.pc = self.cpu.pc.wrapping_add_signed(offset as i16);
                     12
                 } else {8}
@@ -580,7 +638,7 @@ impl GameBoy{
             },
             0xC4 | 0xCC | 0xD4 | 0xDC => {
                 let addr = self.fetch_word();
-                if self.check_condition(opcode & 0b0000_0011) {
+                if self.check_condition(opcode >> 3 & 0b0000_0011) {
                     self.push_u16(self.cpu.pc);
                     self.cpu.pc = addr;
                     24
@@ -596,7 +654,7 @@ impl GameBoy{
                 16
             },
             0xC0 | 0xC8 | 0xD0 | 0xD8 => {
-                if self.check_condition(opcode & 0b0000_0011) {
+                if self.check_condition(opcode >> 3 & 0b0000_0011) {
                     self.cpu.pc = self.pop_u16();
                     20
                 } else {8}
@@ -693,6 +751,187 @@ impl GameBoy{
                 self.cpu.a = data;
                 16
             }
+            0xC6 =>{
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+                let result = a.wrapping_add(literal);
+                self.cpu.a = result;
+                self.cpu.set_flag_z(result == 0);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h((a & 0x0F) + (literal & 0x0F) > 0x0F);
+                self.cpu.set_flag_c((a as u16) + (literal as u16) > 0xFF);
+                8
+            },
+            0xCE => {
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+                let c = if self.cpu.flag_c() {1} else {0};
+                let result = a.wrapping_add(literal).wrapping_add(c);
+                self.cpu.a = result;
+                self.cpu.set_flag_z(result == 0);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h((a & 0x0F) + (literal & 0x0F) + c > 0x0F);
+                self.cpu.set_flag_c((a as u16) + (literal as u16) + (c as u16) > 0xFF);
+                8
+
+            },
+            0xD6 => {
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+                let result = a.wrapping_sub(literal);
+                self.cpu.a = result;
+                self.cpu.set_flag_z(result == 0);
+                self.cpu.set_flag_n(true);
+                self.cpu.set_flag_h((a & 0x0F) < (literal & 0x0F));
+                self.cpu.set_flag_c((a as u16) < (literal as u16));
+                8
+            },
+            0xDE => {
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+                let c = if self.cpu.flag_c() {1} else {0};
+                let result = a.wrapping_sub(literal).wrapping_sub(c);
+                self.cpu.a = result;
+                self.cpu.set_flag_z(result == 0);
+                self.cpu.set_flag_n(true);
+                self.cpu.set_flag_h((a & 0x0F) < (literal & 0x0F) + c);
+                self.cpu.set_flag_c((a as u16) < (literal as u16) + (c as u16));
+                8
+            },
+            0xE6 => {
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+                let result = (a & literal);
+                self.cpu.a = result;
+                self.cpu.set_flag_z(self.cpu.a==0);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h(true);
+                self.cpu.set_flag_c(false);
+                8
+            },
+            0xEE => {
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+                let result = (a ^ literal);
+                self.cpu.a = result;
+                self.cpu.set_flag_z(self.cpu.a ==0);
+                self.cpu.set_flag_h(false);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_c(false);
+                8
+            },
+            0xF6 => {
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+                let result = (a | literal);
+                self.cpu.a = result;
+                self.cpu.set_flag_z(self.cpu.a ==0);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h(false);
+                self.cpu.set_flag_c(false);
+                8
+            },
+            0xFE => {
+                let a = self.cpu.a;
+                let literal = self.fetch_byte();
+
+                self.cpu.set_flag_z(a==literal);
+                self.cpu.set_flag_n(true);
+                self.cpu.set_flag_h((a & 0x0F) < (literal & 0x0F));
+                self.cpu.set_flag_c(a<literal);
+                8
+            },
+            0xF9 => {
+                self.cpu.sp = self.cpu.hl();
+                8
+            },
+            0x27 => {
+                let a = self.cpu.a;
+                if !self.cpu.flag_n() {
+                    if self.cpu.flag_h() || ((a & 0b0000_1111) > 9) {
+                        self.cpu.a = self.cpu.a.wrapping_add(0x06);
+                    }
+                    if self.cpu.flag_c() || (a > 0x99){
+                        self.cpu.a = self.cpu.a.wrapping_add(0x60);
+                        self.cpu.set_flag_c(true);
+                    }
+                }
+                if self.cpu.flag_n(){
+                    if self.cpu.flag_h(){
+                        self.cpu.a = self.cpu.a.wrapping_sub(0x06);
+                    }
+                    if self.cpu.flag_c(){
+                        self.cpu.a = self.cpu.a.wrapping_sub(0x60);
+                    }
+                }
+                self.cpu.set_flag_z(self.cpu.a == 0);
+                self.cpu.set_flag_h(false);
+
+                4
+            },
+            0x07 => {
+                let mut a = self.cpu.a;
+                let b7 = (a & 0b1000_0000) >>7;
+                a = a<<1;
+                a = a + b7;
+                self.cpu.set_flag_c(b7==1);
+
+                self.cpu.a = a;
+                self.cpu.set_flag_z(false);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h(false);
+                4
+            },
+            0x0F => {
+                let mut a = self.cpu.a;
+                let b7 = (a & 0b0000_0001);
+                a = a>>1;
+                a = a + (b7<<7);
+                self.cpu.set_flag_c(b7==1);
+                self.cpu.a = a;
+                self.cpu.set_flag_z(false);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h(false);
+                4
+            },
+            0x17 => {
+                let mut a = self.cpu.a;
+                let b7 = (a & 0b1000_0000) >>7;
+                a = a<<1;
+                let mut c = 0;
+                if self.cpu.flag_c() == true{
+                    c = 1;
+                } else {
+                    c = 0;
+                }
+                a = a + c;
+
+                self.cpu.a = a;
+                self.cpu.set_flag_c(b7==1);
+                self.cpu.set_flag_z(false);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h(false);
+                4
+            },
+            0x1F => {
+                let mut a = self.cpu.a;
+                let b7 = (a & 0b0000_0001) ;
+                a = a>>1;
+                let mut c = 0;
+                if self.cpu.flag_c() == true{
+                    c = 1;
+                } else {
+                    c = 0;
+                }
+                a = a + (c<<7);
+
+                self.cpu.a = a;
+                self.cpu.set_flag_c(b7==1);
+                self.cpu.set_flag_z(false);
+                self.cpu.set_flag_n(false);
+                self.cpu.set_flag_h(false);
+                4
+            },
             _=> panic!("not implemented: {:#04X}", opcode),
         }
     }
@@ -700,6 +939,7 @@ impl GameBoy{
     pub(crate) fn step (&mut self) -> u8 {
         if self.cpu.ime && ((self.mmu.interrupt_enable & self.mmu.interrupt_flag & 0x1F) !=0){
             let index = (self.mmu.interrupt_enable & self.mmu.interrupt_flag & 0x1F).trailing_zeros();
+            self.cpu.halted = false;
             self.cpu.ime = false;
             self.mmu.interrupt_flag &=!(1<<index);
             self.push_u16(self.cpu.pc);
